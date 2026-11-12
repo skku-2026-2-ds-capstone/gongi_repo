@@ -1,0 +1,6 @@
+.env
+# 원자료·중간·피처는 제외하고 외부 타깃·보조 자료(data/external)만 올린다
+data/*
+!data/external/
+__pycache__/
+*.pyc
