@@ -19,7 +19,7 @@ def fig1_forest():
     rows = [("구 25개 · M1", gu, "M1/linear"), ("구 25개 · M2", gu, "M2/linear"),
             ("동 144개 · M1", dn, "M1/linear"), ("동 144개 · M2", dn, "M2/linear")]
     ys = [3, 2, 0.6, -0.4]
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.4), sharey=True)
+    fig, axes = plt.subplots(1, 2, figsize=(8, 3.6), sharey=True)
     for ax, (m, lab) in zip(axes, [("auc", "AUC 차이 (고위험 선별)"), ("spearman", "ρ 차이 (순위)")]):
         for y, (name, df, key) in zip(ys, rows):
             r = df.loc[key]
@@ -27,7 +27,7 @@ def fig1_forest():
             ax.plot([r[f"ci_{m}_lo"], r[f"ci_{m}_hi"]], [y, y], color=col, lw=2.2)
             ax.plot(r[f"diff_{m}"], y, "o", color=col, ms=9)
             ax.text(r[f"diff_{m}"], y + 0.22, f"{r[f'diff_{m}']:+.2f}".replace("-0.00", "0.00"), ha="center",
-                    va="bottom", fontsize=12, color=col, bbox=dict(fc="white", ec="none", pad=1))
+                    va="bottom", fontsize=12.5, color=col, bbox=dict(fc="white", ec="none", pad=1))
         ax.axvline(0, color=BLACK, lw=1)
         for v in (-0.10, 0.10):
             ax.axvline(v, color="#B0B0B0", lw=1, ls="--")

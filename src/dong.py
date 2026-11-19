@@ -151,6 +151,23 @@ def target_validity(num, den):
     return pd.DataFrame(rows)
 
 
+def feature_corr(s, n_boot=N_BOOT):
+    rng = np.random.default_rng(SEED + 2)
+    groups = s.gu.to_numpy()
+    idx = {g: np.flatnonzero(groups == g) for g in np.unique(groups)}
+    gus = list(idx)
+    picks = [np.concatenate([idx[g] for g in rng.choice(gus, len(gus))]) for _ in range(n_boot)]
+    rows = []
+    for c in ["jr_cell", "jeonse_ppsqm_yoy", "jr_cell_chg", "new_share", "lag_log"]:
+        x, y = s[c].to_numpy(), s.lease_rate.to_numpy()
+        ok = ~np.isnan(x)
+        boot = [spearmanr(x[i][ok[i]], y[i][ok[i]]).statistic for i in picks]
+        lo, hi = np.percentile(boot, [2.5, 97.5])
+        rows.append({"feature": c, "n": int(ok.sum()), "spearman": spearmanr(x[ok], y[ok]).statistic,
+                     "ci_lo": lo, "ci_hi": hi})
+    return pd.DataFrame(rows)
+
+
 def judge(d, n_perm):
     groups = d.gu.to_numpy()
     conditions = {
@@ -321,6 +338,10 @@ def main():
     val = target_validity(num, den)
     val.to_csv(OUTPUTS / "dong_target_validity.csv", index=False, encoding="utf-8-sig")
     print("\n타깃 타당성 (구 합산 vs HUG)\n" + val.round(3).to_string(index=False))
+
+    fc = feature_corr(s)
+    fc.to_csv(OUTPUTS / "dong_feature_corr.csv", index=False, encoding="utf-8-sig")
+    print("\n피처별 단순 상관 (2025 동 비율, 구 군집 bootstrap 95% CI)\n" + fc.round(3).to_string(index=False))
 
     if not args.skip_judge:
         res, verdict, comp, diffs, oof = judge(s, args.n_perm)
