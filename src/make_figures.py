@@ -126,9 +126,60 @@ def fig4_context():
     fig.savefig(FIG / "fig4_context.png", dpi=200)
 
 
+def fig5_early_warning():
+    ew = pd.read_csv(OUTPUTS / "dong_early_warning.csv")
+    ew = ew[ew.condition.str.startswith("기본")].set_index("model")
+    cv = pd.read_csv(OUTPUTS / "dong_lag_ladder.csv")
+    cv = cv[cv.condition.str.startswith("기본")].set_index("model")
+    rows = [("P0", "작년 값만"), ("P0+M1", "작년 값 + 시장 피처"), ("M1", "시장 피처만 (M1)"), ("M0", "전세가율만 (M0)")]
+    fig, ax = plt.subplots(figsize=(11, 4.6))
+    for i, (k, lab) in enumerate(rows):
+        y = len(rows) - 1 - i
+        for off, src, col, name in [(0.2, ew, LIGHT, f"급증 직전: 2023년 위험 예측 (동 {int(ew.loc['P0', 'n'])}개)"),
+                                    (-0.2, cv, BLACK, f"급증 이후: 2025년 위험 예측 (동 {int(cv.loc['P0', 'n'])}개)")]:
+            v = src.loc[k, "spearman"]
+            ax.barh(y + off, v, height=0.38, color=col, label=name if i == 0 else None)
+            ax.plot([src.loc[k, "ci_spearman_lo"], src.loc[k, "ci_spearman_hi"]], [y + off] * 2, color="#E06000", lw=1.3)
+            ax.text(src.loc[k, "ci_spearman_hi"] + 0.015, y + off, f"{v:.2f}", va="center", fontsize=12.5)
+    ax.set_yticks(range(len(rows)), [r[1] for r in rows][::-1])
+    ax.tick_params(axis="y", length=0)
+    ax.spines["left"].set_visible(False)
+    ax.set_xlim(0, 1.05)
+    ax.set_xlabel("예측 정확도 ρ (예측한 위험 순위가 실제와 맞는 정도, 1 = 완벽)")
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, 1.14), ncol=2, fontsize=12.5, frameon=False)
+    fig.text(0.99, 0.01, "주황 선: 구를 다시 뽑은 bootstrap 95% CI (2,000회)", ha="right", fontsize=11.5, color=DARK)
+    fig.tight_layout(rect=(0, 0.02, 1, 0.97))
+    fig.savefig(FIG / "fig5_early_warning.png", dpi=200)
+
+
+def fig6_feature_corr():
+    fc = pd.read_csv(OUTPUTS / "dong_feature_corr.csv").set_index("feature")
+    rows = [("lag_log", "작년 등기명령 비율 (참고)"), ("jr_cell", "전세가율"), ("jeonse_ppsqm_yoy", "㎡당 전세가 변화"),
+            ("jr_cell_chg", "전세가율 변화"), ("new_share", "신축 비중")]
+    fig, ax = plt.subplots(figsize=(11, 4.6))
+    for i, (k, lab) in enumerate(rows):
+        y = len(rows) - 1 - i
+        r = fc.loc[k]
+        col = MID if k == "lag_log" else BLACK if r.ci_lo > 0 or r.ci_hi < 0 else LIGHT
+        ax.plot([r.ci_lo, r.ci_hi], [y, y], color=col, lw=2.4)
+        ax.plot(r.spearman, y, "o", color=col, ms=10)
+        ax.text(r.ci_hi + 0.03, y, f"{r.spearman:+.2f}".replace("-0.00", "0.00").replace("+0.00", "0.00"),
+                va="center", fontsize=12.5, color=col if col != LIGHT else DARK)
+    ax.axvline(0, color=BLACK, lw=1)
+    ax.set_yticks(range(len(rows)), [r[1] for r in rows][::-1])
+    ax.tick_params(axis="y", length=0)
+    ax.spines["left"].set_visible(False)
+    ax.set_xlim(-0.7, 1.05)
+    ax.set_xlabel("2025 등기명령 비율과의 Spearman ρ (동 144개)")
+    fig.text(0.99, 0.01, "선: 구를 다시 뽑은 bootstrap 95% CI (2,000회) · 연한 색 = 구간이 0을 포함", ha="right",
+             fontsize=11.5, color=DARK)
+    fig.tight_layout(rect=(0, 0.03, 1, 1))
+    fig.savefig(FIG / "fig6_feature_corr.png", dpi=200)
+
+
 def main():
     FIG.mkdir(parents=True, exist_ok=True)
-    for f in (fig1_forest, fig2_lag_ladder, fig3_rq1, fig4_context):
+    for f in (fig1_forest, fig2_lag_ladder, fig3_rq1, fig4_context, fig5_early_warning, fig6_feature_corr):
         f()
         print("saved", f.__name__)
 

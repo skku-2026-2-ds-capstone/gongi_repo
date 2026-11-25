@@ -47,8 +47,13 @@ python src/temporal.py
 # 5) 법정동 단위 대리 타깃(임차권등기명령), RQ1 4개 구 비교, 그림
 python src/prep_registry.py
 python src/dong.py                # 판정·순열에 몇 분. 빠른 점검은 --skip-judge
+python src/dong.py --early-warning       # 조기 경보: 2021 입력·2022 작년 값 → 2023 비율
+python src/dong.py --early-warning-sens  # 조기 경보 민감도: 두 시기 공통 동, 작년 신청 6건 이상 동
+python src/dong.py --villa-counts        # 빌라 비중 50% 이상 동의 구별 개수
+python src/dong.py --fixed-effects       # 구 고정효과 설명 모형 (동 144개)
 python src/rq1.py
 python src/make_figures.py        # outputs/*.csv 에서만 그림을 그린다 → outputs/figures/
+python src/make_poster.py         # A1 포스터 초안 → materials/poster/poster_draft.pdf (--sketch: A4)
 ```
 
 모든 재표본(bootstrap, 순열, RF·GBM)은 seed 42로 고정한다 (`models.py`·`sensitivity.py`의 `SEED`, `baseline.py`·`temporal.py`의 `default_rng(42)`).

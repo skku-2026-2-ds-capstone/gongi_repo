@@ -16,6 +16,11 @@ TARGET_YEAR, TEST_YEAR, LAG = 2025, 2026, 2
 MIN_DENOM = MIN_GU_N
 SETS = {"M0": ["jr_cell"], "M1": ["jr_cell", "jeonse_ppsqm_yoy", "jr_cell_chg"], "M2": ["jr_cell", "new_share"]}
 LAG_SETS = {"P0": ["lag_log"], "P0+M0": ["lag_log"] + SETS["M0"], "P0+M1": ["lag_log"] + SETS["M1"]}
+EW_TARGET = 2023
+EW_SETS = {"P0": ["lag_log"], "P0+M1": ["lag_log"] + SETS["M1"], "M0": SETS["M0"], "M1": SETS["M1"], "M2": SETS["M2"]}
+EW_MIN_LAG_COUNT = 6
+VILLA_MIN_SHARE = 0.5
+FE_SIGNS = {"jr_cell": 1, "jeonse_ppsqm_yoy": -1, "jr_cell_chg": 1, "new_share": 1}
 YEAR = lambda y: (pd.Timestamp(f"{y}-01-01"), pd.Timestamp(f"{y}-12-31"))
 
 
@@ -305,16 +310,204 @@ def temporal(t, r, num, den, d):
     return pd.DataFrame(run(te, "a 2026 조건 충족 전체") + run(both, "b 판정 표본과 겹치는 동"))
 
 
+def early_frame(t, r, num, den):
+    ty = EW_TARGET
+    d = ladder(t, r, YEAR(ty - LAG), YEAR(ty - LAG - 1))
+    d["lease_rate"], d["num"], d["denom"] = rate(num, den, [ty], [ty - LAG])
+    lag, d["num_lag"], d["denom_lag"] = rate(num, den, [ty - 1], [ty - 1 - LAG])
+    d["lag_log"] = np.log1p(lag)
+    d["gu"] = d.index.str.split(" ").str[0]
+    feats = sorted({f for fs in EW_SETS.values() for f in fs})
+    return d[(d.denom >= MIN_DENOM) & (d.denom_lag >= MIN_DENOM) & (d.n_jeonse_rh >= MIN_GU_N)
+             & d[feats + ["lease_rate"]].notna().all(axis=1)]
+
+
+def main_lag_frame(num):
+    d = pd.read_csv(PROCESSED / "dong_features.csv").set_index("unit")
+    d = d[d.in_sample & (d.denom_lag >= MIN_DENOM)].copy()
+    d["num_lag"] = num.get(TARGET_YEAR - 1, pd.Series(dtype=float)).reindex(d.index).fillna(0)
+    return d
+
+
+def ladder_metrics(s, sets, rng, rng_ci, label, pairs):
+    y, g = s.lease_rate.to_numpy(float), s.gu.to_numpy()
+    yc = high(y, 0.75)
+    preds = {k: cv("linear", s[f].to_numpy(float), np.log1p(y), yc, g) for k, f in sets.items()}
+    sc = {k: score(*p, y, yc, g) for k, p in preds.items()}
+    rows = [{"check": label[0], "period": label[1], "model": k, "n": len(s), "n_gu": int(pd.Series(g).nunique()),
+             "n_high": int(yc.sum()), "spearman": v[0], "auc": v[1], **level_ci(preds[k], y, yc, g, rng_ci)}
+            for k, v in sc.items()]
+    diffs = []
+    for a, b in pairs:
+        bt = cluster_boot(preds[a], preds[b], y, yc, g, rng)
+        lo, hi = np.nanpercentile(bt, [2.5, 97.5], axis=0)
+        obs = np.subtract(sc[a], sc[b])
+        diffs.append({"check": label[0], "period": label[1], "a": a, "b": b,
+                      "diff_spearman": obs[0], "ci_spearman_lo": lo[0], "ci_spearman_hi": hi[0],
+                      "diff_auc": obs[1], "ci_auc_lo": lo[1], "ci_auc_hi": hi[1],
+                      "meets_rule": bool(obs[0] >= MIN_DIFF and obs[1] >= MIN_DIFF and lo[0] > 0 and lo[1] > 0)})
+    return rows, diffs
+
+
+def early_warning_sensitivity(t, r, num, den):
+    before, after = early_frame(t, r, num, den), main_lag_frame(num)
+    sets = {k: EW_SETS[k] for k in ["P0", "P0+M1", "M0", "M1"]}
+    pairs = [("M1", "P0"), ("P0+M1", "P0")]
+    rng, rng_ci = np.random.default_rng(SEED + 5), np.random.default_rng(SEED + 6)
+    common = before.index.intersection(after.index)
+    checks = [(("a 공통 동", "급증 직전 (2023)"), before.loc[common]), (("a 공통 동", "급증 이후 (2025)"), after.loc[common]),
+              ((f"b 작년 {EW_MIN_LAG_COUNT}건 이상", "급증 직전 (2023)"), before[before.num_lag >= EW_MIN_LAG_COUNT]),
+              ((f"b 작년 {EW_MIN_LAG_COUNT}건 이상", "급증 이후 (2025)"), after[after.num_lag >= EW_MIN_LAG_COUNT])]
+    rows, diffs = [], []
+    for label, s in checks:
+        r_, d_ = ladder_metrics(s, sets, rng, rng_ci, label, pairs)
+        rows += r_
+        diffs += d_
+    rows, diffs = pd.DataFrame(rows), pd.DataFrame(diffs)
+    verdicts = []
+    for chk in rows.check.unique():
+        p = rows[(rows.check == chk) & (rows.model == "P0")].set_index("period")
+        b, a = p.loc["급증 직전 (2023)"], p.loc["급증 이후 (2025)"]
+        m1 = diffs[(diffs.check == chk) & (diffs.period == "급증 직전 (2023)") & (diffs.a == "M1")].iloc[0]
+        inside = a.ci_spearman_lo <= b.spearman <= a.ci_spearman_hi
+        if chk.startswith("a"):
+            v = ("시기 차이가 아니라 표본 차이였을 수 있음" if inside else
+                 "결론 유지: 공통 동에서도 작년 값 우위는 급증 이후" if b.spearman < a.spearman and not m1.meets_rule else
+                 "결론 수정 필요")
+        else:
+            v = "측정 잡음(희소성)이 주원인일 수 있음" if inside else "희소성만으로는 설명되지 않음"
+        verdicts.append(f"{chk}: 직전 P0 ρ {b.spearman:.3f} (n {int(b.n)}) vs 이후 {a.spearman:.3f} "
+                        f"[{a.ci_spearman_lo:.3f}, {a.ci_spearman_hi:.3f}] (n {int(a.n)}), 직전 M1 − P0 기준 충족 {m1.meets_rule} → {v}")
+    return rows, diffs, verdicts
+
+
+def villa_counts():
+    d = pd.read_csv(PROCESSED / "dong_features.csv")
+    s = d[d.in_sample].assign(villa_share=lambda x: x.n_jeonse_rh / x.denom)
+    v = s[s.villa_share >= VILLA_MIN_SHARE]
+    c = v.groupby("gu").size().rename("n_dong").reindex(sorted(s.gu.unique()), fill_value=0).reset_index()
+    summary = {"n_sample": len(s), "villa_share_median": float(s.villa_share.median()), "n_villa_dong": len(v),
+               "n_gu_with_any": int((c.n_dong > 0).sum()), "n_gu_with_one": int((c.n_dong == 1).sum()),
+               "n_gu_with_2plus": int((c.n_dong >= 2).sum()), "max_per_gu": int(c.n_dong.max())}
+    return c, summary
+
+
+def _ols(X, y, groups=None):
+    if groups is not None:
+        X = X - pd.DataFrame(X).groupby(groups).transform("mean").to_numpy()
+        y = y - pd.Series(y).groupby(groups).transform("mean").to_numpy()
+    else:
+        X = np.column_stack([np.ones(len(y)), X])
+    b = np.linalg.lstsq(X, y, rcond=None)[0]
+    return b if groups is not None else b[1:]
+
+
+def fixed_effects(n_boot=N_BOOT):
+    d = pd.read_csv(PROCESSED / "dong_features.csv")
+    s = d[d.in_sample].reset_index(drop=True)
+    feats = list(FE_SIGNS)
+    Z = ((s[feats] - s[feats].mean()) / s[feats].std(ddof=0)).to_numpy(float)
+    g = s.gu.to_numpy()
+    gus = np.unique(g)
+    idx = {k: np.flatnonzero(g == k) for k in gus}
+    rng = np.random.default_rng(SEED + 7)
+    draws = [rng.choice(gus, len(gus), replace=True) for _ in range(n_boot)]
+    rows = []
+    for spec, target, fe in [("주: 구 고정효과, log(1+비율)", np.log1p(s.lease_rate.to_numpy(float)), True),
+                             ("참고: 구 고정효과 없음, log(1+비율)", np.log1p(s.lease_rate.to_numpy(float)), False),
+                             ("참고: 구 고정효과, 비율 그대로", s.lease_rate.to_numpy(float), True)]:
+        est = _ols(Z, target, g if fe else None)
+        bt = []
+        for pick in draws:
+            ii = np.concatenate([idx[k] for k in pick])
+            lab = np.concatenate([np.full(len(idx[k]), j) for j, k in enumerate(pick)])
+            bt.append(_ols(Z[ii], target[ii], lab if fe else None))
+        lo, hi = np.percentile(np.array(bt), [2.5, 97.5], axis=0)
+        for j, f in enumerate(feats):
+            sign_ok = np.sign(est[j]) == FE_SIGNS[f]
+            excl = lo[j] > 0 or hi[j] < 0
+            rows.append({"spec": spec, "feature": f, "hyp_sign": "+" if FE_SIGNS[f] > 0 else "−", "coef_per_sd": est[j],
+                         "ci_lo": lo[j], "ci_hi": hi[j], "sign_matches": bool(sign_ok), "ci_excludes_0": bool(excl),
+                         "explains": bool(sign_ok and excl), "n": len(s), "n_gu": len(gus)})
+    return pd.DataFrame(rows)
+
+
+def early_warning(t, r, num, den):
+    s = early_frame(t, r, num, den)
+    y, g = s.lease_rate.to_numpy(float), s.gu.to_numpy()
+    rng, rng_ci = np.random.default_rng(SEED + 3), np.random.default_rng(SEED + 4)
+    rows, diffs = [], []
+    for cond, cut in [("기본 (상위 사분위)", 0.75), ("민감도: 중앙값 이상", 0.50)]:
+        yc = high(y, cut)
+        preds = {k: cv("linear", s[f].to_numpy(float), np.log1p(y), yc, g) for k, f in EW_SETS.items()}
+        sc = {k: score(*p, y, yc, g) for k, p in preds.items()}
+        rows += [{"condition": cond, "model": k, "features": "+".join(EW_SETS[k]), "n": len(s),
+                  "n_high": int(yc.sum()), "spearman": v[0], "auc": v[1], "within_gu_spearman": v[2],
+                  **level_ci(preds[k], y, yc, g, rng_ci)} for k, v in sc.items()]
+        for a, b in [("M1", "P0"), ("P0+M1", "P0"), ("M1", "M0")]:
+            bt = cluster_boot(preds[a], preds[b], y, yc, g, rng)
+            lo, hi = np.nanpercentile(bt, [2.5, 97.5], axis=0)
+            pp = paired_perm(preds[a], preds[b], y, yc, g, rng, by_gu=True)
+            obs = np.subtract(sc[a], sc[b])
+            diffs.append({"condition": cond, "a": a, "b": b,
+                          "diff_spearman": obs[0], "ci_spearman_lo": lo[0], "ci_spearman_hi": hi[0], "p_pair_gu_spearman": pp[0],
+                          "diff_auc": obs[1], "ci_auc_lo": lo[1], "ci_auc_hi": hi[1], "p_pair_gu_auc": pp[1],
+                          "meets_rule": bool(obs[0] >= MIN_DIFF and obs[1] >= MIN_DIFF and lo[0] > 0 and lo[1] > 0)})
+    diffs = pd.DataFrame(diffs)
+    rule = diffs[(diffs.a == "M1") & (diffs.b == "P0") & diffs.condition.str.startswith("기본")].meets_rule.iloc[0]
+    verdict = "사고가 드물 때는 시장 피처가 유용" if rule else "사고가 드물 때도 시장 피처가 작년 값보다 낫다는 근거 없음"
+    sparse = {"n": len(s), "lag_count_le5_share": float((s.num_lag <= 5).mean()),
+              "lag_count_zero_share": float((s.num_lag == 0).mean()),
+              "target_rate_median": float(s.lease_rate.median()), "lag_rate_median": float(np.expm1(s.lag_log).median())}
+    return pd.DataFrame(rows), diffs, verdict, sparse
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--n-perm", type=int, default=1000)
     ap.add_argument("--skip-judge", action="store_true",
                     help="판정·모형 비교(순열, 몇 분)를 건너뛰고 작년 값 사다리·시점 외 검증만 다시 계산")
+    ap.add_argument("--early-warning", action="store_true", help="조기 경보 검증(2021 입력 → 2023 비율)만 계산")
+    ap.add_argument("--early-warning-sens", action="store_true", help="조기 경보 민감도(공통 동, 작년 6건 이상)만 계산")
+    ap.add_argument("--villa-counts", action="store_true", help="빌라 비중 50% 이상 동의 구별 개수만 센다")
+    ap.add_argument("--fixed-effects", action="store_true", help="구 고정효과 설명 모형(동 144개)만 계산")
     args = ap.parse_args()
+
+    if args.fixed_effects:
+        fe = fixed_effects()
+        fe.to_csv(OUTPUTS / "dong_fixed_effects.csv", index=False, encoding="utf-8-sig")
+        print(fe.round(3).to_string(index=False))
+        return
+
+    if args.villa_counts:
+        c, sm = villa_counts()
+        c.to_csv(OUTPUTS / "dong_villa_counts.csv", index=False, encoding="utf-8-sig")
+        print(sm)
+        print(c[c.n_dong > 0].to_string(index=False))
+        return
 
     t, r = (as_dong(x) for x in load())
     num, den = registry_counts(), jeonse_counts()
     print(f"분모(3개 유형 전세)가 있는 해: {list(den.columns)}")
+
+    if args.early_warning:
+        ew, ewd, ewv, sp = early_warning(t, r, num, den)
+        ew.to_csv(OUTPUTS / "dong_early_warning.csv", index=False, encoding="utf-8-sig")
+        ewd.to_csv(OUTPUTS / "dong_early_warning_diff.csv", index=False, encoding="utf-8-sig")
+        print("\n조기 경보 표본: " + ", ".join(f"{k} {v:.3g}" for k, v in sp.items()))
+        print("\n조기 경보 사다리 (2021 입력 → 2023 비율)\n" + ew.drop(columns="features").round(3).to_string(index=False))
+        print("\n차이 (구 군집 bootstrap 95% CI, 쌍체 순열 구 통째)\n" + ewd.round(3).to_string(index=False))
+        print("\n판정: " + ewv)
+        return
+
+    if args.early_warning_sens:
+        es, esd, ev = early_warning_sensitivity(t, r, num, den)
+        es.to_csv(OUTPUTS / "dong_early_warning_sens.csv", index=False, encoding="utf-8-sig")
+        esd.to_csv(OUTPUTS / "dong_early_warning_sens_diff.csv", index=False, encoding="utf-8-sig")
+        print("\n조기 경보 민감도\n" + es.round(3).to_string(index=False))
+        print("\n차이 (구 군집 bootstrap 95% CI)\n" + esd.round(3).to_string(index=False))
+        print("\n판정\n" + "\n".join(ev))
+        return
 
     d = ladder(t, r, WINDOWS["main"], WINDOWS["prev"])
     prop = unit_features(t, r, *WINDOWS["prop"])
